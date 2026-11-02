@@ -48,7 +48,7 @@
 #define ESP_RC_SLOW_FREQ        136000
 #define ESP_RC_FAST_FREQ        17500000
 #define ESP_RC_FAST_DIV_FREQ    (ESP_RC_FAST_FREQ / 256)
-#define ESP_XTAL32K_FREQ        32000
+#define ESP_XTAL32K_FREQ        32768
 
 
 /**

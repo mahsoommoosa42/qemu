@@ -275,6 +275,9 @@ qtests_riscv32 = \
 qtests_riscv64 = \
   (unpack_edk2_blobs ? ['bios-tables-test'] : [])
 
+qtests_xtensa = \
+  (config_all_devices.has_key('CONFIG_XTENSA_ESP32S3') ? ['esp32s3-timg-rtc-calibration-test'] : [])
+
 qos_test_ss = ss.source_set()
 qos_test_ss.add(
   'ac97-test.c',
