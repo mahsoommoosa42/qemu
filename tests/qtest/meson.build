@@ -260,9 +260,6 @@ qtests_aarch64 = \
    'boot-serial-test',
    'migration-test']
 
-qtests_xtensa = (config_all_devices.has_key('CONFIG_XTENSA_ESP32S3') ?
-                  ['esp32s3-system-test'] : [])
-
 qtests_s390x = \
   qtests_filter + \
   ['boot-serial-test',
@@ -279,7 +276,8 @@ qtests_riscv64 = \
   (unpack_edk2_blobs ? ['bios-tables-test'] : [])
 
 qtests_xtensa = \
-  (config_all_devices.has_key('CONFIG_XTENSA_ESP32S3') ? ['esp32s3-system-test', 'esp32s3-rtc-test', 'esp32s3-rtc-clock-test'] : [])
+  (config_all_devices.has_key('CONFIG_XTENSA_ESP32S3') ?
+    ['esp32s3-system-test', 'esp32s3-rtc-test', 'esp32s3-rtc-clock-test'] : [])
 
 qos_test_ss = ss.source_set()
 qos_test_ss.add(
