@@ -14,6 +14,7 @@
 #include "hw/sysbus.h"
 #include "hw/registerfields.h"
 #include "hw/misc/esp32s3_reg.h"
+#include "qemu/timer.h"
 
 #define TYPE_ESP32S3_RTC_CNTL "misc.esp32s3.rtc_cntl"
 #define ESP32S3_RTC_CNTL(obj) OBJECT_CHECK(Esp32s3RtcCntlState, (obj), TYPE_ESP32S3_RTC_CNTL)
@@ -77,6 +78,17 @@ typedef struct Esp32s3RtcCntlState {
     Esp32s3SlowClkSel rtc_slowclk;
     uint32_t rtc_slowclk_freq;
     int64_t time_base_ns;
+    uint64_t time_base_ticks;
+
+    QEMUTimer *sleep_timer;
+    uint64_t sleep_target;
+    bool alarm_enabled;
+    bool sleeping;
+    uint32_t wakeup_state_reg;
+    uint32_t wakeup_cause;
+    uint32_t dig_pwc_reg;
+    uint32_t int_raw;
+    uint32_t int_ena;
 
     uint32_t options0_reg;
     uint64_t time_reg;
@@ -86,6 +98,9 @@ typedef struct Esp32s3RtcCntlState {
     bool stat_vector_sel[ESP32S3_CPU_COUNT];
 } Esp32s3RtcCntlState;
 
+/* A digital reset ends sleep without resetting the retained RTC domain. */
+void esp32s3_rtc_cntl_reset_sleep(Esp32s3RtcCntlState *s);
+
 REG32(RTC_CNTL_OPTIONS0, 0x00)
     FIELD(RTC_CNTL_OPTIONS0, SW_SYS_RESET, 31, 1)
     FIELD(RTC_CNTL_OPTIONS0, SW_PROCPU_RESET, 5, 1)
@@ -93,17 +108,34 @@ REG32(RTC_CNTL_OPTIONS0, 0x00)
     FIELD(RTC_CNTL_OPTIONS0, SW_STALL_PROCPU_C0, 2, 2)
     FIELD(RTC_CNTL_OPTIONS0, SW_STALL_APPCPU_C0, 0, 2)
 
+REG32(RTC_CNTL_SLP_TIMER0, 0x04)
+REG32(RTC_CNTL_SLP_TIMER1, 0x08)
+    FIELD(RTC_CNTL_SLP_TIMER1, SLP_VAL_HI, 0, 16)
+    FIELD(RTC_CNTL_SLP_TIMER1, MAIN_TIMER_ALARM_EN, 16, 1)
+
 REG32(RTC_CNTL_TIME_UPDATE, 0xc)
     FIELD(RTC_CNTL_TIME_UPDATE, UPDATE, 31, 1)
     FIELD(RTC_CNTL_TIME_UPDATE, VALID, 30, 1)
 REG32(RTC_CNTL_TIME0, 0x10)
 REG32(RTC_CNTL_TIME1, 0x14)
 
+REG32(RTC_CNTL_STATE0, 0x18)
+    FIELD(RTC_CNTL_STATE0, SLEEP_EN, 31, 1)
+
 REG32(RTC_CNTL_RESET_STATE, 0x38)
     FIELD(RTC_CNTL_RESET_STATE, PROCPU_STAT_VECTOR_SEL, 13, 1)
     FIELD(RTC_CNTL_RESET_STATE, APPCPU_STAT_VECTOR_SEL, 12, 1)
     FIELD(RTC_CNTL_RESET_STATE, RESET_CAUSE_APPCPU, 6, 6)
     FIELD(RTC_CNTL_RESET_STATE, RESET_CAUSE_PROCPU, 0, 6)
+
+REG32(RTC_CNTL_WAKEUP_STATE, 0x3c)
+    FIELD(RTC_CNTL_WAKEUP_STATE, WAKEUP_ENA, 15, 17)
+REG32(RTC_CNTL_INT_ENA, 0x40)
+REG32(RTC_CNTL_INT_RAW, 0x44)
+    FIELD(RTC_CNTL_INT_RAW, SLP_WAKEUP, 0, 1)
+    FIELD(RTC_CNTL_INT_RAW, MAIN_TIMER, 10, 1)
+REG32(RTC_CNTL_INT_ST, 0x48)
+REG32(RTC_CNTL_INT_CLR, 0x4c)
 
 REG32(RTC_CNTL_STORE0, 0x50)
 REG32(RTC_CNTL_STORE1, 0x54)
@@ -115,6 +147,9 @@ REG32(RTC_CNTL_CLK_CONF, 0x74)
     FIELD(RTC_CNTL_CLK_CONF, FAST_CLK_RTC_SEL, 29, 1)
     FIELD(RTC_CNTL_CLK_CONF, SOC_CLK_SEL, 27, 2)
 
+REG32(RTC_CNTL_DIG_PWC, 0x90)
+    FIELD(RTC_CNTL_DIG_PWC, DG_WRAP_PD_EN, 31, 1)
+
 REG32(RTC_CNTL_SW_CPU_STALL, 0xbc)
     FIELD(RTC_CNTL_SW_CPU_STALL, PROCPU_C1, 26, 6)
     FIELD(RTC_CNTL_SW_CPU_STALL, APPCPU_C1, 20, 6)
@@ -123,6 +158,9 @@ REG32(RTC_CNTL_STORE4, 0xc0)
 REG32(RTC_CNTL_STORE5, 0xc4)
 REG32(RTC_CNTL_STORE6, 0xc8)
 REG32(RTC_CNTL_STORE7, 0xcc)
+REG32(RTC_CNTL_SLP_WAKEUP_CAUSE, 0x130)
+REG32(RTC_CNTL_INT_ENA_W1TS, 0x138)
+REG32(RTC_CNTL_INT_ENA_W1TC, 0x13c)
 REG32(RTC_CNTL_DATE,   0x1fc)
 
 #define ESP32S3_RTC_CNTL_SIZE (A_RTC_CNTL_DATE + 4)

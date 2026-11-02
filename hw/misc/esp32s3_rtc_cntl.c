@@ -24,6 +24,76 @@
 static void esp32s3_rtc_update_cpu_stall(Esp32s3RtcCntlState* s);
 static void esp32s3_rtc_update_clk(Esp32s3RtcCntlState* s);
 
+#define RTC_TIMER_MASK MAKE_64BIT_MASK(0, 48)
+#define RTC_TIMER_WAKEUP BIT(3)
+#define RTC_SLEEP_INTERRUPTS (R_RTC_CNTL_INT_RAW_SLP_WAKEUP_MASK | \
+                              R_RTC_CNTL_INT_RAW_MAIN_TIMER_MASK)
+
+static uint64_t esp32s3_rtc_ticks(Esp32s3RtcCntlState *s)
+{
+    return (s->time_base_ticks + muldiv64(
+                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->time_base_ns,
+                s->rtc_slowclk_freq, NANOSECONDS_PER_SECOND)) & RTC_TIMER_MASK;
+}
+
+static void esp32s3_rtc_update_irq(Esp32s3RtcCntlState *s)
+{
+    qemu_set_irq(s->irq, (s->int_raw & s->int_ena) != 0);
+}
+
+static void esp32s3_rtc_update_alarm(Esp32s3RtcCntlState *s)
+{
+    uint64_t now = esp32s3_rtc_ticks(s);
+    int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1;
+
+    if (!s->alarm_enabled) {
+        timer_del(s->sleep_timer);
+        return;
+    }
+    if (s->sleep_target > now) {
+        uint64_t ticks = (s->sleep_target - s->time_base_ticks) &
+                         RTC_TIMER_MASK;
+        uint64_t ns = muldiv64(ticks, NANOSECONDS_PER_SECOND,
+                              s->rtc_slowclk_freq);
+
+        /* Keep the counter's phase, including a partially elapsed slow tick. */
+        deadline = s->time_base_ns + ns;
+        if (muldiv64(ns, s->rtc_slowclk_freq, NANOSECONDS_PER_SECOND) < ticks) {
+            deadline++;
+        }
+    }
+    timer_mod(s->sleep_timer, deadline);
+}
+
+void esp32s3_rtc_cntl_reset_sleep(Esp32s3RtcCntlState *s)
+{
+    if (!s->sleeping) {
+        return;
+    }
+    timer_del(s->sleep_timer);
+    s->alarm_enabled = false;
+    s->sleeping = false;
+    esp32s3_rtc_update_cpu_stall(s);
+}
+
+static void esp32s3_rtc_timer_expired(void *opaque)
+{
+    Esp32s3RtcCntlState *s = opaque;
+
+    s->alarm_enabled = false;
+    s->int_raw |= R_RTC_CNTL_INT_RAW_MAIN_TIMER_MASK;
+    if (s->sleeping && (FIELD_EX32(s->wakeup_state_reg,
+            RTC_CNTL_WAKEUP_STATE, WAKEUP_ENA) & RTC_TIMER_WAKEUP)) {
+        s->wakeup_cause = RTC_TIMER_WAKEUP;
+        s->int_raw |= R_RTC_CNTL_INT_RAW_SLP_WAKEUP_MASK;
+        for (int i = 0; i < ESP32S3_CPU_COUNT; i++) {
+            s->reset_cause[i] = ESP32_DEEPSLEEP_RESET;
+        }
+        qemu_irq_pulse(s->dig_reset_req);
+    }
+    esp32s3_rtc_update_irq(s);
+}
+
 static uint64_t esp32s3_rtc_cntl_read(void *opaque, hwaddr addr, unsigned int size)
 {
     Esp32s3RtcCntlState *s = ESP32S3_RTC_CNTL(opaque);
@@ -31,6 +101,15 @@ static uint64_t esp32s3_rtc_cntl_read(void *opaque, hwaddr addr, unsigned int si
     switch (addr) {
     case A_RTC_CNTL_OPTIONS0:
         r = s->options0_reg;
+        break;
+    case A_RTC_CNTL_SLP_TIMER0:
+        r = s->sleep_target & UINT32_MAX;
+        break;
+    case A_RTC_CNTL_SLP_TIMER1:
+        r = s->sleep_target >> 32;
+        break;
+    case A_RTC_CNTL_STATE0:
+        r = s->sleeping ? R_RTC_CNTL_STATE0_SLEEP_EN_MASK : 0;
         break;
     case A_RTC_CNTL_TIME_UPDATE:
         r = R_RTC_CNTL_TIME_UPDATE_VALID_MASK;
@@ -47,6 +126,25 @@ static uint64_t esp32s3_rtc_cntl_read(void *opaque, hwaddr addr, unsigned int si
         r = FIELD_DP32(r, RTC_CNTL_RESET_STATE, RESET_CAUSE_APPCPU, s->reset_cause[1]);
         r = FIELD_DP32(r, RTC_CNTL_RESET_STATE, PROCPU_STAT_VECTOR_SEL, s->stat_vector_sel[0]);
         r = FIELD_DP32(r, RTC_CNTL_RESET_STATE, APPCPU_STAT_VECTOR_SEL, s->stat_vector_sel[1]);
+        break;
+
+    case A_RTC_CNTL_WAKEUP_STATE:
+        r = s->wakeup_state_reg;
+        break;
+    case A_RTC_CNTL_SLP_WAKEUP_CAUSE:
+        r = s->wakeup_cause;
+        break;
+    case A_RTC_CNTL_DIG_PWC:
+        r = s->dig_pwc_reg;
+        break;
+    case A_RTC_CNTL_INT_ENA:
+        r = s->int_ena;
+        break;
+    case A_RTC_CNTL_INT_RAW:
+        r = s->int_raw;
+        break;
+    case A_RTC_CNTL_INT_ST:
+        r = s->int_raw & s->int_ena;
         break;
 
     case A_RTC_CNTL_STORE0:
@@ -81,6 +179,61 @@ static void esp32s3_rtc_cntl_write(void *opaque, hwaddr addr, uint64_t value,
 {
     Esp32s3RtcCntlState *s = ESP32S3_RTC_CNTL(opaque);
     switch (addr) {
+    case A_RTC_CNTL_SLP_TIMER0:
+        s->sleep_target = (s->sleep_target & ~UINT64_C(0xffffffff)) | value;
+        esp32s3_rtc_update_alarm(s);
+        break;
+    case A_RTC_CNTL_SLP_TIMER1:
+        s->sleep_target = (s->sleep_target & UINT32_MAX) |
+                         ((value & UINT64_C(0xffff)) << 32);
+        if (value & R_RTC_CNTL_SLP_TIMER1_MAIN_TIMER_ALARM_EN_MASK) {
+            s->alarm_enabled = true;
+        }
+        esp32s3_rtc_update_alarm(s);
+        break;
+    case A_RTC_CNTL_STATE0:
+        if (!(value & R_RTC_CNTL_STATE0_SLEEP_EN_MASK)) {
+            break;
+        }
+        if (!(s->dig_pwc_reg & R_RTC_CNTL_DIG_PWC_DG_WRAP_PD_EN_MASK)) {
+            qemu_log_mask(LOG_UNIMP,
+                          "esp32s3: light sleep is not implemented\n");
+            break;
+        }
+        if (FIELD_EX32(s->wakeup_state_reg, RTC_CNTL_WAKEUP_STATE,
+                      WAKEUP_ENA) & ~RTC_TIMER_WAKEUP) {
+            qemu_log_mask(LOG_UNIMP,
+                          "esp32s3: only RTC timer wakeup is implemented\n");
+        }
+        s->sleeping = true;
+        s->wakeup_cause = 0;
+        esp32s3_rtc_update_cpu_stall(s);
+        if (s->int_raw & R_RTC_CNTL_INT_RAW_MAIN_TIMER_MASK) {
+            esp32s3_rtc_timer_expired(s);
+        }
+        break;
+    case A_RTC_CNTL_WAKEUP_STATE:
+        s->wakeup_state_reg = value & R_RTC_CNTL_WAKEUP_STATE_WAKEUP_ENA_MASK;
+        break;
+    case A_RTC_CNTL_DIG_PWC:
+        s->dig_pwc_reg = value;
+        break;
+    case A_RTC_CNTL_INT_ENA:
+        s->int_ena = value & RTC_SLEEP_INTERRUPTS;
+        esp32s3_rtc_update_irq(s);
+        break;
+    case A_RTC_CNTL_INT_ENA_W1TS:
+        s->int_ena |= value & RTC_SLEEP_INTERRUPTS;
+        esp32s3_rtc_update_irq(s);
+        break;
+    case A_RTC_CNTL_INT_ENA_W1TC:
+        s->int_ena &= ~value;
+        esp32s3_rtc_update_irq(s);
+        break;
+    case A_RTC_CNTL_INT_CLR:
+        s->int_raw &= ~value;
+        esp32s3_rtc_update_irq(s);
+        break;
     case A_RTC_CNTL_OPTIONS0:
         if (value & R_RTC_CNTL_OPTIONS0_SW_SYS_RESET_MASK) {
             s->reset_cause[0] = ESP32_SW_SYS_RESET;
@@ -104,9 +257,7 @@ static void esp32s3_rtc_cntl_write(void *opaque, hwaddr addr, uint64_t value,
 
     case A_RTC_CNTL_TIME_UPDATE:
         if (value & R_RTC_CNTL_TIME_UPDATE_UPDATE_MASK) {
-            s->time_reg = muldiv64(
-                qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->time_base_ns,
-                s->rtc_slowclk_freq, NANOSECONDS_PER_SECOND);
+            s->time_reg = esp32s3_rtc_ticks(s);
         }
         break;
 
@@ -125,10 +276,13 @@ static void esp32s3_rtc_cntl_write(void *opaque, hwaddr addr, uint64_t value,
         break;
 
     case A_RTC_CNTL_CLK_CONF:
+        s->time_base_ticks = esp32s3_rtc_ticks(s);
+        s->time_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         s->soc_clk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, SOC_CLK_SEL);
         s->rtc_fastclk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, FAST_CLK_RTC_SEL);
         s->rtc_slowclk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, ANA_CLK_RTC_SEL);
         esp32s3_rtc_update_clk(s);
+        esp32s3_rtc_update_alarm(s);
         break;
 
     case A_RTC_CNTL_SW_CPU_STALL:
@@ -155,8 +309,8 @@ static void esp32s3_rtc_update_cpu_stall(Esp32s3RtcCntlState* s)
 
     const uint32_t stall_magic_val = 0x86;
 
-    s->cpu_stall_state[0] = procpu_stall == stall_magic_val;
-    s->cpu_stall_state[1] = appcpu_stall == stall_magic_val;
+    s->cpu_stall_state[0] = s->sleeping || procpu_stall == stall_magic_val;
+    s->cpu_stall_state[1] = s->sleeping || appcpu_stall == stall_magic_val;
 
     qemu_set_irq(s->cpu_stall_req[0], s->cpu_stall_state[0]);
     qemu_set_irq(s->cpu_stall_req[1], s->cpu_stall_state[1]);
@@ -182,6 +336,8 @@ static void esp32s3_rtc_cntl_reset_hold(Object *obj, ResetType type)
     Esp32s3RtcCntlState *s = ESP32S3_RTC_CNTL(obj);
 
     s->time_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->time_base_ticks = 0;
+    esp32s3_rtc_cntl_reset_sleep(s);
 }
 
 static void esp32s3_rtc_cntl_realize(DeviceState *dev, Error **errp)
@@ -192,6 +348,9 @@ static void esp32s3_rtc_cntl_init(Object *obj)
 {
     Esp32s3RtcCntlState *s = ESP32S3_RTC_CNTL(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+
+    s->sleep_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                esp32s3_rtc_timer_expired, s);
 
     memory_region_init_io(&s->iomem, obj, &esp32s3_rtc_cntl_ops, s,
                           TYPE_ESP32S3_RTC_CNTL, ESP32S3_RTC_CNTL_SIZE);
@@ -219,6 +378,13 @@ static Property esp32s3_rtc_cntl_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
+static void esp32s3_rtc_cntl_finalize(Object *obj)
+{
+    Esp32s3RtcCntlState *s = ESP32S3_RTC_CNTL(obj);
+
+    timer_free(s->sleep_timer);
+}
+
 static void esp32s3_rtc_cntl_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -234,6 +400,7 @@ static const TypeInfo esp32s3_rtc_cntl_info = {
     .parent = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(Esp32s3RtcCntlState),
     .instance_init = esp32s3_rtc_cntl_init,
+    .instance_finalize = esp32s3_rtc_cntl_finalize,
     .class_init = esp32s3_rtc_cntl_class_init
 };
 

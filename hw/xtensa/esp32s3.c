@@ -332,6 +332,7 @@ static void esp32s3_soc_reset(DeviceState *dev)
     if (s->requested_reset == 0) {
         s->requested_reset = ESP32S3_SOC_RESET_ALL;
     }
+    esp32s3_rtc_cntl_reset_sleep(&s->rtc_cntl);
     if (s->requested_reset & ESP32S3_SOC_RESET_PERIPH) {
         device_cold_reset(DEVICE(&s->clock));
         device_cold_reset(DEVICE(&s->intmatrix));
@@ -545,6 +546,9 @@ static void esp32s3_soc_realize(DeviceState *dev, Error **errp)
 
     qdev_realize(DEVICE(&s->rtc_cntl), &s->rtc_bus, &error_fatal);
     esp32s3_soc_add_periph_device(sys_mem, &s->rtc_cntl, DR_REG_RTCCNTL_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->rtc_cntl), 0,
+                       qdev_get_gpio_in(intmatrix_dev,
+                                        ETS_RTC_CORE_INTR_SOURCE));
 
     qdev_connect_gpio_out_named(DEVICE(&s->rtc_cntl), ESP32S3_RTC_DIG_RESET_GPIO, 0,
                                 qdev_get_gpio_in_named(dev, ESP32S3_RTC_DIG_RESET_GPIO, 0));
