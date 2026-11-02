@@ -161,6 +161,8 @@ typedef struct Esp32s3SocState {
     bool cpu_stall_level[ESP32S3_CPU_COUNT];
     /* Stall-line reports a core reset by the other core still waits for. */
     uint8_t cpu_reset_hold[ESP32S3_CPU_COUNT];
+    bool app_cpu_stall;
+    bool app_cpu_reset;
 } Esp32s3SocState;
 
 
@@ -202,6 +204,10 @@ static void esp32s3_update_runstall(Esp32s3SocState *s, int n)
     CPUState *core = CPU(&s->cpu[n]);
     bool hold = s->cpu_stall_level[n] || s->cpu_reset_hold[n];
 
+    if (n == 1) {
+        hold |= s->app_cpu_stall;
+    }
+
     if (hold == env->runstall) {
         return;
     }
@@ -242,6 +248,31 @@ static void esp32s3_reset_one_core(Esp32s3SocState *s, int n)
 static void esp32s3_reset_one_core_work(CPUState *cs, run_on_cpu_data data)
 {
     esp32s3_reset_one_core(data.host_ptr, cs->cpu_index);
+}
+
+static void esp32s3_app_cpu_stall(void *opaque, int n, int level)
+{
+    Esp32s3SocState *s = ESP32S3_SOC(opaque);
+
+    s->app_cpu_stall = level;
+    esp32s3_update_runstall(s, 1);
+}
+
+static void esp32s3_app_cpu_reset(void *opaque, int n, int level)
+{
+    Esp32s3SocState *s = ESP32S3_SOC(opaque);
+    CPUState *core = CPU(&s->cpu[1]);
+    bool reset = level && !s->app_cpu_reset;
+
+    s->app_cpu_reset = level;
+    if (reset) {
+        if (qemu_cpu_is_self(core)) {
+            esp32s3_reset_one_core(s, 1);
+        } else {
+            async_run_on_cpu(core, esp32s3_reset_one_core_work,
+                             RUN_ON_CPU_HOST_PTR(s));
+        }
+    }
 }
 
 static void esp32s3_cpu_reset(void* opaque, int n, int level)
@@ -302,6 +333,7 @@ static void esp32s3_soc_reset(DeviceState *dev)
         s->requested_reset = ESP32S3_SOC_RESET_ALL;
     }
     if (s->requested_reset & ESP32S3_SOC_RESET_PERIPH) {
+        device_cold_reset(DEVICE(&s->clock));
         device_cold_reset(DEVICE(&s->intmatrix));
         for (int i = 0; i < ESP32S3_UART_COUNT; ++i) {
             device_cold_reset(DEVICE(&s->uart[i]));
@@ -654,6 +686,10 @@ static void esp32s3_soc_init(Object *obj)
     qdev_init_gpio_in_named(DEVICE(s), esp32s3_dig_reset,  ESP32S3_RTC_DIG_RESET_GPIO, 1);
     qdev_init_gpio_in_named(DEVICE(s), esp32s3_cpu_reset,  ESP32S3_RTC_CPU_RESET_GPIO, ESP32S3_CPU_COUNT);
     qdev_init_gpio_in_named(DEVICE(s), esp32s3_cpu_stall,  ESP32S3_RTC_CPU_STALL_GPIO, ESP32S3_CPU_COUNT);
+    qdev_init_gpio_in_named(DEVICE(s), esp32s3_app_cpu_stall,
+                           ESP32S3_CLOCK_APPCPU_STALL_GPIO, 1);
+    qdev_init_gpio_in_named(DEVICE(s), esp32s3_app_cpu_reset,
+                           ESP32S3_CLOCK_APPCPU_RESET_GPIO, 1);
     qdev_init_gpio_in_named(DEVICE(s), esp32s3_clk_update, ESP32S3_RTC_CLK_UPDATE_GPIO, 1);
 
     object_initialize_child(obj, "twai", &s->twai, TYPE_ESP32S3_TWAI);
@@ -825,7 +861,16 @@ static void esp32s3_machine_init(MachineState *machine)
 
     /* System clock realization */
     {
-        sysbus_realize(SYS_BUS_DEVICE(&ss->clock), &error_fatal);
+        qdev_connect_gpio_out_named(DEVICE(&ss->clock),
+            ESP32S3_CLOCK_APPCPU_STALL_GPIO, 0,
+            qdev_get_gpio_in_named(DEVICE(ss),
+                                  ESP32S3_CLOCK_APPCPU_STALL_GPIO, 0));
+        qdev_connect_gpio_out_named(DEVICE(&ss->clock),
+            ESP32S3_CLOCK_APPCPU_RESET_GPIO, 0,
+            qdev_get_gpio_in_named(DEVICE(ss),
+                                  ESP32S3_CLOCK_APPCPU_RESET_GPIO, 0));
+        /* SYSTEM registers survive resets of an individual CPU. */
+        qdev_realize(DEVICE(&ss->clock), &ss->periph_bus, &error_fatal);
         MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&ss->clock), 0);
         memory_region_add_subregion_overlap(sys_mem, DR_REG_SYSTEM_BASE, mr, 0);
         /* Connect the IRQ lines to the interrupt matrix */

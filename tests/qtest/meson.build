@@ -260,6 +260,9 @@ qtests_aarch64 = \
    'boot-serial-test',
    'migration-test']
 
+qtests_xtensa = (config_all_devices.has_key('CONFIG_XTENSA_ESP32S3') ?
+                  ['esp32s3-system-test'] : [])
+
 qtests_s390x = \
   qtests_filter + \
   ['boot-serial-test',
