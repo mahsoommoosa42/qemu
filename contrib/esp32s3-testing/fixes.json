@@ -1,0 +1,24 @@
+{
+  "upstream_commit": "febae182e132e4055529be423a818225ebddaa3a",
+  "existing_upstream_changes": [
+    {"pr": "https://github.com/espressif/qemu/pull/185", "area": "S3 shared interrupt levels and remapping", "adaptation": "ESP32-S3 portion"},
+    {"pr": "https://github.com/espressif/qemu/pull/199", "area": "S3 interrupt status registers", "adaptation": "reuse PR185 bitmap; omit duplicate declarations and test registration"},
+    {"pr": "https://github.com/espressif/qemu/pull/187", "area": "UART2 character backend"},
+    {"pr": "https://github.com/espressif/qemu/pull/190", "area": "RTC CPU stall and CPU-local reset"},
+    {"pr": "https://github.com/espressif/qemu/pull/155", "area": "FPU startup enables", "adaptation": "also restore the same value in PR190 CPU-local reset helper"}
+  ],
+  "contribution_branches": [
+    {"branch": "fix/esp32s3-core1-control", "issue": 200, "area": "SYSTEM CPU1 controls and reset domains", "requires_pr": 190},
+    {"branch": "fix/esp32s3-deep-sleep-timer", "issue": 105, "area": "S3 deep sleep and RTC timer wake", "requires_pr": 190},
+    {"branch": "fix/esp32s3-rtc-clock", "issue": 202, "area": "RTC nominal frequencies and selector bounds"},
+    {"branch": "fix/esp-timg-rtc-calibration", "issue": 203, "area": "TIMG calibration bounds and crystal frequency"},
+    {"branch": "fix/esp32-uart-icount", "issue": 201, "area": "Throttled UART notification starvation"}
+  ],
+  "excluded": ["PR192 RX overflow policy; it did not fix the warm-switch workload"],
+  "limitations": [
+    "CPU clock propagation remains incomplete (upstream issue204); no physical timing claim.",
+    "Deep sleep supports RTC timer wake only; other wake sources and power consumption are not modeled.",
+    "FPU reset value follows PR155 policy; silicon reset-vector value has not been independently measured.",
+    "Physical hardware and MTTCG have not been validated."
+  ]
+}
