@@ -243,6 +243,8 @@ static void esp32s3_reset_one_core(Esp32s3SocState *s, int n)
     xtensa_select_static_vectors(&cpu->env, s->rtc_cntl.stat_vector_sel[n]);
     remove_cpu_watchpoints(cpu);
     cpu_reset(CPU(cpu));
+    /* CPU-local resets must restore the same value as SoC resets. */
+    cpu->env.sregs[CPENABLE] = 0xff;
 }
 
 static void esp32s3_reset_one_core_work(CPUState *cs, run_on_cpu_data data)
