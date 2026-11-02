@@ -137,6 +137,56 @@ static void test_deep_sleep_no_wakeup(const void *with_alarm)
     qtest_quit(qts);
 }
 
+static void test_clock_write_preserves_phase(void)
+{
+    QTestState *qts = rtc_init();
+    int64_t tick_ns = (NANOSECONDS_PER_SECOND + SLOW_HZ - 1) / SLOW_HZ;
+
+    rtc_alarm(qts, 1);
+    qtest_clock_step(qts, tick_ns / 2);
+    g_assert_cmpuint(rtc_time(qts), ==, 0);
+    /* Changing only FAST must not restart the unchanged slow oscillator. */
+    rtc_write(qts, A_RTC_CNTL_CLK_CONF,
+              FIELD_DP32(0, RTC_CNTL_CLK_CONF, ANA_CLK_RTC_SEL,
+                         ESP32_SLOW_CLK_32KXTAL) |
+              R_RTC_CNTL_CLK_CONF_FAST_CLK_RTC_SEL_MASK);
+    qtest_clock_step(qts, tick_ns - tick_ns / 2);
+    g_assert_cmpuint(rtc_time(qts), ==, 1);
+    g_assert_cmphex(rtc_read(qts, A_RTC_CNTL_INT_RAW), ==,
+                    R_RTC_CNTL_INT_RAW_MAIN_TIMER_MASK);
+    qtest_quit(qts);
+}
+
+static void test_rearm_with_pending_interrupt(void)
+{
+    QTestState *qts = rtc_init();
+    uint64_t before;
+
+    rtc_alarm(qts, SLOW_HZ);
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND + 1);
+    g_assert_cmphex(rtc_read(qts, A_RTC_CNTL_INT_RAW), ==,
+                    R_RTC_CNTL_INT_RAW_MAIN_TIMER_MASK);
+    before = rtc_time(qts);
+    rtc_alarm(qts, before + SLOW_HZ);
+    /* Sleep entry clears wake status, not the latched main-timer IRQ. */
+    rtc_write(qts, A_RTC_CNTL_INT_CLR,
+              R_RTC_CNTL_INT_RAW_SLP_WAKEUP_MASK);
+    rtc_sleep(qts, TIMER_WAKEUP);
+    g_assert_cmphex(rtc_read(qts, A_RTC_CNTL_STATE0), ==,
+                    R_RTC_CNTL_STATE0_SLEEP_EN_MASK);
+    g_assert_cmphex(rtc_read(qts, A_RTC_CNTL_SLP_WAKEUP_CAUSE), ==, 0);
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND / 2);
+    g_assert_cmphex(rtc_read(qts, A_RTC_CNTL_STATE0), ==,
+                    R_RTC_CNTL_STATE0_SLEEP_EN_MASK);
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND / 2 + 1);
+    qtest_qmp_eventwait(qts, "RESET");
+    g_assert_cmphex(rtc_read(qts, A_RTC_CNTL_STATE0), ==, 0);
+    g_assert_cmphex(rtc_read(qts, A_RTC_CNTL_SLP_WAKEUP_CAUSE), ==,
+                    TIMER_WAKEUP);
+    g_assert_cmpuint(rtc_time(qts), ==, before + SLOW_HZ);
+    qtest_quit(qts);
+}
+
 static void test_clock_change(void)
 {
     QTestState *qts = rtc_init();
@@ -245,6 +295,10 @@ int main(int argc, char **argv)
                         GUINT_TO_POINTER(1), test_deep_sleep_no_wakeup);
     qtest_add_func("/esp32s3/rtc/timer-interrupt", test_timer_interrupt);
     qtest_add_func("/esp32s3/rtc/clock-change", test_clock_change);
+    qtest_add_func("/esp32s3/rtc/clock-write-preserves-phase",
+                   test_clock_write_preserves_phase);
+    qtest_add_func("/esp32s3/rtc/rearm-pending-interrupt",
+                   test_rearm_with_pending_interrupt);
     qtest_add_data_func("/esp32s3/rtc/guest-no-wakeup", NULL, test_guest_sleep);
     qtest_add_data_func("/esp32s3/rtc/guest-timer-wakeup", GUINT_TO_POINTER(1),
                         test_guest_sleep);

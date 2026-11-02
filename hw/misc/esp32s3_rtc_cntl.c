@@ -43,16 +43,18 @@ static void esp32s3_rtc_update_irq(Esp32s3RtcCntlState *s)
 
 static void esp32s3_rtc_update_alarm(Esp32s3RtcCntlState *s)
 {
-    uint64_t now = esp32s3_rtc_ticks(s);
-    int64_t deadline = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1;
+    int64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint64_t elapsed = muldiv64(now_ns - s->time_base_ns,
+                               s->rtc_slowclk_freq, NANOSECONDS_PER_SECOND);
+    uint64_t now = (s->time_base_ticks + elapsed) & RTC_TIMER_MASK;
+    int64_t deadline = now_ns + 1;
 
     if (!s->alarm_enabled) {
         timer_del(s->sleep_timer);
         return;
     }
     if (s->sleep_target > now) {
-        uint64_t ticks = (s->sleep_target - s->time_base_ticks) &
-                         RTC_TIMER_MASK;
+        uint64_t ticks = elapsed + (s->sleep_target - now);
         uint64_t ns = muldiv64(ticks, NANOSECONDS_PER_SECOND,
                               s->rtc_slowclk_freq);
 
@@ -208,7 +210,8 @@ static void esp32s3_rtc_cntl_write(void *opaque, hwaddr addr, uint64_t value,
         s->sleeping = true;
         s->wakeup_cause = 0;
         esp32s3_rtc_update_cpu_stall(s);
-        if (s->int_raw & R_RTC_CNTL_INT_RAW_MAIN_TIMER_MASK) {
+        if (!s->alarm_enabled &&
+            (s->int_raw & R_RTC_CNTL_INT_RAW_MAIN_TIMER_MASK)) {
             esp32s3_rtc_timer_expired(s);
         }
         break;
@@ -279,17 +282,19 @@ static void esp32s3_rtc_cntl_write(void *opaque, hwaddr addr, uint64_t value,
         uint32_t slowclk = FIELD_EX32(value, RTC_CNTL_CLK_CONF,
                                     ANA_CLK_RTC_SEL);
 
-        s->time_base_ticks = esp32s3_rtc_ticks(s);
-        s->time_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        s->soc_clk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, SOC_CLK_SEL);
-        s->rtc_fastclk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, FAST_CLK_RTC_SEL);
         if (slowclk <= ESP32_SLOW_CLK_8MD256) {
+            if (slowclk != s->rtc_slowclk) {
+                s->time_base_ticks = esp32s3_rtc_ticks(s);
+                s->time_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            }
             s->rtc_slowclk = slowclk;
         } else {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "esp32s3_rtc_cntl: invalid RTC slow clock source %u\n",
                           slowclk);
         }
+        s->soc_clk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, SOC_CLK_SEL);
+        s->rtc_fastclk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, FAST_CLK_RTC_SEL);
         esp32s3_rtc_update_clk(s);
         esp32s3_rtc_update_alarm(s);
         break;
