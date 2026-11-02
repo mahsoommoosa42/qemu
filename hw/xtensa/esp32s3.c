@@ -266,7 +266,8 @@ static void esp32s3_app_cpu_reset(void *opaque, int n, int level)
 
     s->app_cpu_reset = level;
     if (reset) {
-        if (qemu_cpu_is_self(core)) {
+        /* A self-reset must leave the current TB before resetting the CPU. */
+        if (qemu_cpu_is_self(core) && current_cpu != core) {
             esp32s3_reset_one_core(s, 1);
         } else {
             async_run_on_cpu(core, esp32s3_reset_one_core_work,

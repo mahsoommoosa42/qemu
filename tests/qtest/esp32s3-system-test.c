@@ -13,6 +13,8 @@
 #define COUNTER0       0x3fc80000
 #define COUNTER1       0x3fc80004
 #define BOOT_COUNT1    0x3fc8000c
+#define SELF_RESET_REQ 0x3fc80010
+#define SELF_RESET_BAD 0x3fc80014
 
 static char *rom_dir;
 
@@ -133,6 +135,27 @@ static void test_execution(void)
     qtest_quit(qts);
 }
 
+static void test_self_reset(void)
+{
+    QTestState *qts = start_machine(true);
+
+    qtest_writel(qts, SYSTEM_CONTROL, 2);
+    qtest_qmp_assert_success(qts, "{'execute': 'cont'}");
+    wait_for_change(qts, BOOT_COUNT1, 0);
+    qtest_writel(qts, SELF_RESET_REQ, 1);
+    wait_for_change(qts, SYSTEM_CONTROL, 2);
+    assert_cpu1_stalled(qts);
+    g_assert_cmphex(qtest_readl(qts, BOOT_COUNT1), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, SELF_RESET_BAD), ==, 0);
+
+    qtest_writel(qts, SYSTEM_CONTROL, 2);
+    wait_for_change(qts, BOOT_COUNT1, 1);
+    g_assert_cmphex(qtest_readl(qts, BOOT_COUNT1), ==, 2);
+    g_assert_cmphex(qtest_readl(qts, SELF_RESET_BAD), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, COUNTER0 + 8), ==, 1);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     /*
@@ -140,18 +163,27 @@ int main(int argc, char **argv)
      * counter+8, then increment the counter continuously. No ESP-IDF or
      * external cross compiler is needed to exercise both CPUs.
      *
-     * j start; .align 4; .word 0x3fc80000
+     * j start; .align 4; .word 0x3fc80000; .word 0x600c0000
      * start: rsr a2,prid; extui a2,a2,1,1; slli a2,a2,2; l32r a3,literal
      * add.n a2,a2,a3; l32i.n a4,a2,8; addi.n a4,a4,1; s32i.n a4,a2,8
      * movi.n a4,0
-     * loop: addi.n a4,a4,1; s32i.n a4,a2,0; j loop
+     * loop: addi.n a4,a4,1; s32i.n a4,a2,0; bbci a2,2,loop
+     * l32i.n a5,a2,12; beqz a5,loop; movi.n a5,0; s32i.n a5,a2,12
+     * l32r a3,control_literal; movi.n a5,6; s32i.n a5,a3,0
+     * movi.n a5,1; s32i.n a5,a2,16; j loop
+     *
+     * CPU1 also polls counter+12 for a self-reset request. Its post-reset
+     * store to counter+16 must never execute.
      */
     static const uint8_t code[] = {
-        0x06, 0x01, 0x00, 0x00, 0x00, 0x00, 0xc8, 0x3f,
-        0x20, 0xeb, 0x03, 0x20, 0x21, 0x04, 0xe0, 0x22,
-        0x11, 0x31, 0xfc, 0xff, 0x3a, 0x22, 0x48, 0x22,
-        0x1b, 0x44, 0x49, 0x22, 0x0c, 0x04, 0x1b, 0x44,
-        0x49, 0x02, 0x06, 0xfe, 0xff,
+        0x06, 0x02, 0x00, 0x00, 0x00, 0x00, 0xc8, 0x3f,
+        0x00, 0x00, 0x0c, 0x60, 0x20, 0xeb, 0x03, 0x20,
+        0x21, 0x04, 0xe0, 0x22, 0x11, 0x31, 0xfb, 0xff,
+        0x3a, 0x22, 0x48, 0x22, 0x1b, 0x44, 0x49, 0x22,
+        0x0c, 0x04, 0x1b, 0x44, 0x49, 0x02, 0x27, 0x62,
+        0xf8, 0x58, 0x32, 0x16, 0x35, 0xff, 0x0c, 0x05,
+        0x59, 0x32, 0x31, 0xf5, 0xff, 0x0c, 0x65, 0x59,
+        0x03, 0x0c, 0x15, 0x59, 0x42, 0x46, 0xf8, 0xff,
     };
     uint8_t rom[0x400 + sizeof(code)] = { 0 };
     char *rom_path;
@@ -168,6 +200,7 @@ int main(int argc, char **argv)
     qtest_add_func("/esp32s3/system/registers", test_registers);
     if (qtest_has_accel("tcg")) {
         qtest_add_func("/esp32s3/system/execution", test_execution);
+        qtest_add_func("/esp32s3/system/self-reset", test_self_reset);
     }
     ret = g_test_run();
     unlink(rom_path);
