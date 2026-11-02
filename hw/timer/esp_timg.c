@@ -106,6 +106,13 @@ static void esp_timg_rtc_cali_update(ESPTimgState *s, uint32_t value)
 
         /* Get the clock that is being calibrated */
         const uint32_t clk = FIELD_EX32(value, TIMG_RTCCALICFG, CLK_SEL);
+        if (clk >= ARRAY_SIZE(osc_freq_arr)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "esp_timg: unsupported RTC calibration source %u\n",
+                          clk);
+            s->rtc.rtc_cali_cfg = value;
+            return;
+        }
         const uint32_t freq = osc_freq_arr[clk];
 
         /* And the counter that should be reached by this clock */

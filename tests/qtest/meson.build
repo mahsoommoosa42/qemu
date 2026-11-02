@@ -277,7 +277,8 @@ qtests_riscv64 = \
 
 qtests_xtensa = \
   (config_all_devices.has_key('CONFIG_XTENSA_ESP32S3') ?
-    ['esp32s3-system-test', 'esp32s3-rtc-test', 'esp32s3-rtc-clock-test'] : [])
+    ['esp32s3-system-test', 'esp32s3-rtc-test', 'esp32s3-rtc-clock-test',
+     'esp32s3-timg-rtc-calibration-test'] : [])
 
 qos_test_ss = ss.source_set()
 qos_test_ss.add(
