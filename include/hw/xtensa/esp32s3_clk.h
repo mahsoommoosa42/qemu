@@ -20,6 +20,8 @@
 
 
 #define ESP32S3_SYSTEM_CPU_INTR_COUNT   4
+#define ESP32S3_CLOCK_APPCPU_STALL_GPIO "appcpu-stall"
+#define ESP32S3_CLOCK_APPCPU_RESET_GPIO "appcpu-reset"
 
 /**
  * Value for SYSTEM_SOC_CLK_SEL
@@ -57,6 +59,9 @@ typedef struct ESP32S3ClockState {
     uint32_t levels;
     
     uint32_t app_cpu_addr;
+    uint32_t app_cpu_control;
+    qemu_irq app_cpu_stall_req;
+    qemu_irq app_cpu_reset_req;
     
     uint32_t sys_ext_dev_enc_dec_ctrl;
 } ESP32S3ClockState;

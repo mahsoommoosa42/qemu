@@ -46,12 +46,26 @@ static uint32_t esp32s3_clock_get_ext_dev_enc_dec_ctrl(ESP32S3ClockState *s)
     return s->sys_ext_dev_enc_dec_ctrl;
 }
 
+static void esp32s3_clock_update_app_cpu(ESP32S3ClockState *s)
+{
+    uint32_t control = s->app_cpu_control;
+    bool reset = FIELD_EX32(control, SYSTEM_CORE_1_CONTROL_0_REG, RESETING);
+    bool stall = FIELD_EX32(control, SYSTEM_CORE_1_CONTROL_0_REG, RUNSTALL) ||
+                 !FIELD_EX32(control, SYSTEM_CORE_1_CONTROL_0_REG, CLKGATE_EN);
+
+    qemu_set_irq(s->app_cpu_stall_req, stall || reset);
+    qemu_set_irq(s->app_cpu_reset_req, reset);
+}
+
 static uint64_t esp32s3_clock_read(void *opaque, hwaddr addr, unsigned int size)
 {
     ESP32S3ClockState *s = ESP32S3_CLOCK(opaque);
     uint64_t r = 0;
 
     switch(addr) {
+    case A_SYSTEM_CORE_1_CONTROL_0_REG:
+        r = s->app_cpu_control;
+        break;
         case A_SYSTEM_CORE_1_CONTROL_1_REG:
                 r = s->app_cpu_addr;
             break;
@@ -85,6 +99,13 @@ static void esp32s3_clock_write(void *opaque, hwaddr addr, uint64_t value,
     ESP32S3ClockState *s = ESP32S3_CLOCK(opaque);
 
     switch(addr) {
+    case A_SYSTEM_CORE_1_CONTROL_0_REG:
+        s->app_cpu_control = value &
+            (R_SYSTEM_CORE_1_CONTROL_0_REG_RUNSTALL_MASK |
+             R_SYSTEM_CORE_1_CONTROL_0_REG_CLKGATE_EN_MASK |
+             R_SYSTEM_CORE_1_CONTROL_0_REG_RESETING_MASK);
+        esp32s3_clock_update_app_cpu(s);
+        break;
         case A_SYSTEM_CORE_1_CONTROL_1_REG:
                 s->app_cpu_addr = (uint32_t)value;
             break;
@@ -114,6 +135,9 @@ static const MemoryRegionOps esp32s3_clock_ops = {
 static void esp32s3_clock_reset_hold(Object *obj, ResetType type)
 {
     ESP32S3ClockState *s = ESP32S3_CLOCK(obj);
+    s->app_cpu_addr = 0;
+    s->app_cpu_control = R_SYSTEM_CORE_1_CONTROL_0_REG_RESETING_MASK;
+    esp32s3_clock_update_app_cpu(s);
     /* On board reset, set the proper clocks and dividers */
     s->sysclk = ( 1 << R_SYSTEM_SYSCLK_CONF_PRE_DIV_CNT_SHIFT) |
                 (ESP32S3_CLK_SEL_PLL << R_SYSTEM_SYSCLK_CONF_SOC_CLK_SEL_SHIFT) |
@@ -150,6 +174,10 @@ static void esp32s3_clock_init(Object *obj)
     for (uint64_t i = 0; i < ESP32S3_SYSTEM_CPU_INTR_COUNT; i++) {
         sysbus_init_irq(sbd, &s->irqs[i]);
     }
+    qdev_init_gpio_out_named(DEVICE(s), &s->app_cpu_stall_req,
+                            ESP32S3_CLOCK_APPCPU_STALL_GPIO, 1);
+    qdev_init_gpio_out_named(DEVICE(s), &s->app_cpu_reset_req,
+                            ESP32S3_CLOCK_APPCPU_RESET_GPIO, 1);
 }
 
 static void esp32s3_clock_class_init(ObjectClass *klass, void *data)
