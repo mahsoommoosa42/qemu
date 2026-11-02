@@ -275,15 +275,24 @@ static void esp32s3_rtc_cntl_write(void *opaque, hwaddr addr, uint64_t value,
         s->scratch_reg[(addr - A_RTC_CNTL_STORE0) / 4] = value;
         break;
 
-    case A_RTC_CNTL_CLK_CONF:
+    case A_RTC_CNTL_CLK_CONF: {
+        uint32_t slowclk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, ANA_CLK_RTC_SEL);
+
         s->time_base_ticks = esp32s3_rtc_ticks(s);
         s->time_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         s->soc_clk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, SOC_CLK_SEL);
         s->rtc_fastclk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, FAST_CLK_RTC_SEL);
-        s->rtc_slowclk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, ANA_CLK_RTC_SEL);
+        if (slowclk <= ESP32_SLOW_CLK_8MD256) {
+            s->rtc_slowclk = slowclk;
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "esp32s3_rtc_cntl: invalid RTC slow clock source %u\n",
+                          slowclk);
+        }
         esp32s3_rtc_update_clk(s);
         esp32s3_rtc_update_alarm(s);
         break;
+    }
 
     case A_RTC_CNTL_SW_CPU_STALL:
         s->sw_cpu_stall_reg = value;
@@ -318,8 +327,8 @@ static void esp32s3_rtc_update_cpu_stall(Esp32s3RtcCntlState* s)
 
 static void esp32s3_rtc_update_clk(Esp32s3RtcCntlState* s)
 {
-    const uint32_t slowclk_freq[] = {150000, 32768, 8000000/256};
-    const uint32_t fastclk_freq[] = {s->xtal_apb_freq / 4, 8000000};
+    const uint32_t slowclk_freq[] = {136000, 32768, 17500000 / 256};
+    const uint32_t fastclk_freq[] = {s->xtal_apb_freq / 2, 17500000};
     s->rtc_slowclk_freq = slowclk_freq[s->rtc_slowclk];
     s->rtc_fastclk_freq = fastclk_freq[s->rtc_fastclk];
     qemu_irq_pulse(s->clk_update);
@@ -367,7 +376,7 @@ static void esp32s3_rtc_cntl_init(Object *obj)
     }
 
     s->rtc_slowclk = ESP32_SLOW_CLK_RC;
-    s->rtc_fastclk = ESP32_FAST_CLK_8M;
+    s->rtc_fastclk = ESP32_FAST_CLK_XTALD2;
     s->soc_clk = ESP32_SOC_CLK_XTAL;
     s->xtal_apb_freq = 40000000;
     s->pll_apb_freq = 80000000;

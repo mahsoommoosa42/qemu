@@ -49,7 +49,7 @@ typedef enum Esp32s3SocClkSel {
 } Esp32s3SocClkSel;
 
 typedef enum Esp32s3FastClkSel {
-    ESP32_FAST_CLK_XTALD4 = 0,
+    ESP32_FAST_CLK_XTALD2 = 0,
     ESP32_FAST_CLK_8M = 1
 } Esp32s3FastClkSel;
 
