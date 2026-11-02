@@ -86,7 +86,10 @@ static uint64_t uart_read(void *opaque, hwaddr addr, unsigned int size)
         } else {
             r = fifo8_pop(&s->rx_fifo);
             esp32_uart_update_irq(s);
-            qemu_chr_fe_accept_input(&s->chr);
+            /* The throttle timer notifies the backend when RX resumes. */
+            if (!s->throttle_rx) {
+                qemu_chr_fe_accept_input(&s->chr);
+            }
         }
         break;
 
