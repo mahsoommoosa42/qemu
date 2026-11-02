@@ -276,7 +276,8 @@ static void esp32s3_rtc_cntl_write(void *opaque, hwaddr addr, uint64_t value,
         break;
 
     case A_RTC_CNTL_CLK_CONF: {
-        uint32_t slowclk = FIELD_EX32(value, RTC_CNTL_CLK_CONF, ANA_CLK_RTC_SEL);
+        uint32_t slowclk = FIELD_EX32(value, RTC_CNTL_CLK_CONF,
+                                    ANA_CLK_RTC_SEL);
 
         s->time_base_ticks = esp32s3_rtc_ticks(s);
         s->time_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
